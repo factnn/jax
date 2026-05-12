@@ -1585,7 +1585,7 @@ def _interpret_jaxpr(
         )
 
       elif prim is primitives.semaphore_signal_p:
-        sem, sem_transforms, inc, target_device_id, core_index = (
+        sem, sem_transforms, inc, target_device_id, core_index, _ = (
             jax.tree.unflatten(eqn.params['args_tree'], deferred_invals()))
         target_device_id = interpret_utils._device_id_to_logical(
             target_device_id, eqn.params['device_id_type'], ctx.axis_sizes,

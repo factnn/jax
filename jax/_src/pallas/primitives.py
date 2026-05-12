@@ -971,6 +971,7 @@ def semaphore_signal(
     device_id: DeviceId = None,
     device_id_type: DeviceIdType = DeviceIdType.MESH,
     core_index: int | jax_typing.Array | None = None,
+    subcore_index: int | jax_typing.Array | None = None,
 ):
   """Increments the value of a semaphore.
 
@@ -989,10 +990,12 @@ def semaphore_signal(
       ``device_id`` should be specified.
     core_index (optional): If on a multi-core device,
       specifies which core to signal.
+    subcore_index (optional): If the core has multiple subcores,
+      specifies which subcore to signal.
   """
   ref, transforms = _get_ref_and_transforms(sem_or_view)
   inc = jnp.asarray(inc, dtype=jnp.int32)
-  args = [ref, transforms, inc, device_id, core_index]
+  args = [ref, transforms, inc, device_id, core_index, subcore_index]
   flat_args, args_tree = tree_util.tree_flatten(args)
   semaphore_signal_p.bind(
       *flat_args,
@@ -1013,6 +1016,7 @@ def _semaphore_signal_abstract_eval(
       value_aval,
       device_id_aval,
       core_index_aval,
+      subcore_index_aval,
   ) = tree_util.tree_unflatten(args_tree, avals)
   check_sem_avals(sem_aval, sem_transforms_avals, "signal")
   if value_aval.dtype != jnp.dtype("int32"):
@@ -1073,6 +1077,7 @@ def _semaphore_signal_pp_eqn(eqn: jax_core.JaxprEqn,
       value,
       device_ids,
       _,
+      _,
   ) = tree_util.tree_unflatten(tree, invars)
   out = pp.concat([
       pp.text("semaphore_signal"),
@@ -1097,11 +1102,14 @@ def _semaphore_signal_discharge_rule(in_avals,
                                      args_tree,
                                      device_id_type):
   del out_avals, device_id_type
-  [ref, transforms, inc, device_id, core_index] = args_tree.unflatten(flat_args)
+  [ref, transforms, inc, device_id, core_index, subcore_index] = (
+      args_tree.unflatten(flat_args))
   if device_id is not None:
     raise NotImplementedError("Remote signal not implemented.")
   if core_index is not None:
     raise NotImplementedError("Multiple core support not implemented.")
+  if subcore_index is not None:
+    raise NotImplementedError("Subcore support not implemented.")
   sem_value = _transform_semaphore(ref, transforms, in_avals[0])
   inc = inc.astype(pallas_core.SEMAPHORE_INTERPRET_DTYPE)
   _, new_sem_value = state_discharge.transform_swap_array(

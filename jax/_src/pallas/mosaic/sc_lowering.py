@@ -25,6 +25,7 @@ from jax._src import numpy as jnp
 from jax._src import state
 from jax._src import tree_util
 from jax._src import util
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
 from jax._src.lib.mlir.dialects import memref
@@ -458,27 +459,40 @@ def _dma_start_lowering_rule(
         "`pltpu.async_copy(..., dst_ref=ref.at[iota_ref], ...)`."
     )
   core_index = None
+  subcore_index = None
   if device_id is not None:
     if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
       dest_mesh = sem_aval.memory_space.mesh
     else:
       dest_mesh = None
-    device_id, core_index = tc_lowering._device_id_to_logical(
+    device_id, core_index, subcore_index = tc_lowering._device_id_to_logical(
         ctx, device_id, device_id_type, device_id_aval, dest_mesh
     )
 
   # If not ``None``, we lower to an indirect DMA instead.
   if indirect_offsets is None:
     def _dma_start(src_ref, dst_ref, sem, src_sem):
-      tpu.enqueue_dma(
-          source=src_ref,
-          target=dst_ref,
-          target_semaphore=sem,
-          source_semaphore=src_sem,
-          device_id=device_id,
-          priority=priority,
-        core_id=core_index,
-      )
+      if jaxlib_extension_version < 459:
+        tpu.enqueue_dma(
+            source=src_ref,
+            target=dst_ref,
+            target_semaphore=sem,
+            source_semaphore=src_sem,
+            device_id=device_id,
+            priority=priority,
+            core_id=core_index,
+        )
+      else:
+        tpu.enqueue_dma(
+            source=src_ref,
+            target=dst_ref,
+            target_semaphore=sem,
+            source_semaphore=src_sem,
+            device_id=device_id,
+            priority=priority,
+            core_id=core_index,
+            subcore_id=subcore_index,  # pyrefly: ignore[unexpected-keyword]
+        )
       return []
 
     return tc_lowering.lower_with_transformed_refs(
@@ -545,7 +559,7 @@ def _dma_wait_lowering_rule(
       dest_mesh = sem_aval.memory_space.mesh
     else:
       dest_mesh = None
-    device_id, core_id = tc_lowering._device_id_to_logical(
+    device_id, core_id, _ = tc_lowering._device_id_to_logical(
         ctx, device_id, device_id_type, device_id_aval, dest_mesh
     )
     if core_id:

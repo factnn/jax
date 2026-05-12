@@ -5072,7 +5072,8 @@ def semaphore_signal(
   ref, transforms = pallas_primitives._get_ref_and_transforms(semaphore)
   value = jnp.asarray(inc, dtype=jnp.int32)
   core_index = None
-  args = [ref, transforms, value, device_id, core_index]
+  subcore_index = None
+  args = [ref, transforms, value, device_id, core_index, subcore_index]
   flat_args, args_tree = tree_util.tree_flatten(args)
   semaphore_signal_p.bind(
       *flat_args,
@@ -5108,16 +5109,21 @@ def _semaphore_signal_lowering_rule(
     memory_scope: Literal["sys", "gpu"] = "sys",
 ):
   i32 = ir.IntegerType.get_signless(32)
-  sem, transforms, value, device_id, core_index = tree_util.tree_unflatten(
-      args_tree, args
+  sem, transforms, value, device_id, core_index, subcore_index = (
+      tree_util.tree_unflatten(args_tree, args)
   )
-  sem_aval, transform_avals, _, device_id_aval, _ = tree_util.tree_unflatten(
+  sem_aval, transform_avals, _, device_id_aval, _, _ = tree_util.tree_unflatten(
       args_tree, ctx.avals_in
   )
   if core_index is not None:
     raise NotImplementedError(
         "Mosaic GPU backend does not support the concept of cores, but"
         " core_index is specified"
+    )
+  if subcore_index is not None:
+    raise NotImplementedError(
+        "Mosaic GPU backend does not support the concept of subcores, but"
+        " subcore_index is specified"
     )
   assert isinstance(sem_aval, state_types.AbstractRef)
   sem, _, transforms = lowering._handle_transforms(
