@@ -1712,6 +1712,81 @@ def _reinterpret_cast(ref: ir.Value, new_ref_aval: state_types.AbstractRef) -> i
   return mgpu.dialect.reinterpret_cast(new_ty, ref)
 
 
+def _commute_for_dispatch(
+    ctx: LoweringRuleContext,
+    aval: jax_core.AbstractValue,
+    transforms: Sequence[state_types.Transform],
+    transform_avals: Sequence[state_types.Transform],
+    *,
+    handle_indexers: bool = True,
+    handle_transposes: bool = True,
+    handle_reshapes: bool = True,
+) -> tuple[
+    list[state_types.Transform],
+    list[state_types.Transform],
+    list[state_types.Transform],
+    list[state_types.Transform],
+]:
+  """Bubbles up dispatchable `transforms`.
+
+  Returns a tuple where:
+    * first element is a list of dispatched transforms
+    * second element is a list of avals corresponding to dispatched transforms
+    * third element is a list of remaining (non-dispatched) transforms
+    * fourth element is a list of avals corresponding to remaining transforms
+  """
+  dispatched_transforms = []
+  dispatched_transform_avals = []
+  remaining_transforms = []
+  remaining_transform_avals = []
+
+  for t_aval, t in zip(transform_avals, transforms):
+    is_dispatchable = False
+    match t:
+      case indexing.NDIndexer() if handle_indexers:
+        is_dispatchable = True
+      case TransposeTransform() if handle_transposes:
+        is_dispatchable = True
+      case ReshapeTransform() if handle_reshapes:
+        is_dispatchable = True
+      case (
+          gpu_core.PeerMemRef()
+          | gpu_core.MulticastRef()
+          | gpu_core.ClusterRefTransform()
+      ) if handle_indexers:
+        is_dispatchable = True
+
+    if is_dispatchable:
+      (
+          t_bubbled,
+          t_aval_bubbled,
+          remaining_transforms,
+          remaining_transform_avals,
+      ) = _bubble_up_transform(
+          ctx,
+          aval,
+          remaining_transforms,
+          remaining_transform_avals,
+          t,
+          t_aval,
+      )
+      dispatched_transforms.append(t_bubbled)
+      dispatched_transform_avals.append(t_aval_bubbled)
+      aval = t_aval_bubbled.transform_type(aval)
+    else:
+      remaining_transforms.append(t)
+      remaining_transform_avals.append(t_aval)
+
+  assert len(dispatched_transforms) == len(dispatched_transform_avals)
+  assert len(remaining_transforms) == len(remaining_transform_avals)
+  return (
+      dispatched_transforms,
+      dispatched_transform_avals,
+      remaining_transforms,
+      remaining_transform_avals,
+  )
+
+
 def _handle_transforms(
     ctx: LoweringRuleContext,
     ref_aval: state_types.AbstractRef,
@@ -1737,6 +1812,15 @@ def _handle_transforms(
   )
 
   if ctx.module_ctx.lowering_semantics == mgpu.LoweringSemantics.Warpgroup:
+    _commute_for_dispatch(
+        ctx,
+        ref_aval,
+        transforms,
+        transform_avals,
+        handle_transposes=False,
+        handle_reshapes=handle_reshapes,
+    )
+
     spec_transforms = []
     num_block_spec_transforms = 0
     for t in transforms:
@@ -1758,28 +1842,31 @@ def _handle_transforms(
         raise ValueError("Unexpected untiling or unswizzle transform found in "
                          f"remaining transforms: {transforms}.")
 
+  (
+      dispatched_transforms,
+      dispatched_transform_avals,
+      remaining_transforms,
+      _,
+  ) = _commute_for_dispatch(
+      ctx,
+      ref_aval,
+      transforms,
+      transform_avals,
+      handle_transposes=handle_transposes,
+      handle_reshapes=handle_reshapes,
+  )
+
   transformed_ref: Any = ref
-  new_transforms = []
-  new_transforms_avals = []
   peer_device_id = None
   is_multicast = False
   cluster_dim = None
   cluster_idx = None
 
-  for t_aval, t in zip(transform_avals, transforms):
+  for t_aval, t in zip(dispatched_transform_avals, dispatched_transforms):
     match t:
       case indexing.NDIndexer() as indexer:
-        indexer, indexer_aval, new_transforms, new_transforms_avals = (
-            _bubble_up_transform(
-                ctx,
-                ref_aval,
-                new_transforms,
-                new_transforms_avals,
-                indexer,
-                cast(indexing.NDIndexer, t_aval),
-            )
-        )
-        if indexer_aval.int_indexer_shape:
+        assert isinstance(t_aval, indexing.NDIndexer)
+        if t_aval.int_indexer_shape:
           raise NotImplementedError("int_indexer_shape non-empty")
         indices = _ndindexer_indices(indexer)
         if (
@@ -1789,42 +1876,19 @@ def _handle_transforms(
           transformed_ref = transformed_ref.slice(*indices)
         else:
           transformed_ref = mgpu_utils.memref_slice(transformed_ref, indices)
-        ref_aval = indexer_aval.transform_type(ref_aval)
+        ref_aval = t_aval.transform_type(ref_aval)
       case TransposeTransform() as t:
-        if handle_transposes:
-          t, t_aval, new_transforms, new_transforms_avals = _bubble_up_transform(
-              ctx,
-              ref_aval,
-              new_transforms,
-              new_transforms_avals,
-              t,
-              cast(TransposeTransform, t_aval),
-          )
-          assert isinstance(t, TransposeTransform)
-          if isinstance(transformed_ref, tcgen05.TMEMRef):
-            raise ValueError("TMEM transpose not allowed.")
-          transformed_ref = mgpu.memref_transpose(
-              transformed_ref, t.permutation
-          )
-          ref_aval = t_aval.transform_type(ref_aval)
-        else:
-          new_transforms.append(t)
-          new_transforms_avals.append(t_aval)
-      case ReshapeTransform() if handle_reshapes:
-        t, _, new_transforms, new_transforms_avals = _bubble_up_transform(
-            ctx,
-            ref_aval,
-            new_transforms,
-            new_transforms_avals,
-            t,
-            cast(ReshapeTransform, t_aval),
+        if isinstance(transformed_ref, tcgen05.TMEMRef):
+          raise ValueError("TMEM transpose not allowed.")
+        transformed_ref = mgpu.memref_transpose(
+            transformed_ref, t.permutation
         )
+        ref_aval = t_aval.transform_type(ref_aval)  # pyrefly: ignore [bad-assignment]
+      case ReshapeTransform() as t:
         if isinstance(transformed_ref, tcgen05.TMEMRef):
           raise ValueError("TMEM reshape not allowed.")
-        assert isinstance(t, ReshapeTransform)
         transformed_ref = mgpu.memref_reshape(transformed_ref, t.shape)
-        # pyrefly: ignore[bad-assignment]
-        ref_aval = t_aval.transform_type(ref_aval)
+        ref_aval = t_aval.transform_type(ref_aval)  # pyrefly: ignore [bad-assignment]
       case gpu_core.PeerMemRef(device_id, device_id_type):
         assert isinstance(t_aval, gpu_core.PeerMemRef)
         peer_device_id = _device_id_to_logical(
@@ -1845,8 +1909,10 @@ def _handle_transforms(
         cluster_dim = _resolve_cluster_axis(ctx.module_ctx.axis_names, dims[0])
         cluster_idx = _as_index(idxs[0])
       case _:
-        new_transforms.append(t)
-        new_transforms_avals.append(t_aval)
+        raise AssertionError(
+            f"Unexpected non-dispatchable transform in dispatched list: {t}"
+        )
+
   if cluster_dim is not None:
     assert cluster_idx is not None
     if ctx.module_ctx.lowering_semantics == mgpu.LoweringSemantics.Warpgroup:
@@ -1871,7 +1937,7 @@ def _handle_transforms(
   if is_multicast:
     transformed_ref = ctx.launch_ctx.to_remote_multicast(transformed_ref)
   assert isinstance(ref_aval, state_types.AbstractRef)
-  return transformed_ref, ref_aval, new_transforms
+  return transformed_ref, ref_aval, remaining_transforms
 
 
 def _ndindexer_indices(
