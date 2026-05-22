@@ -26,7 +26,7 @@ from jax._src import config
 from jax._src import linear_util as lu
 from jax._src.interpreters import partial_eval as pe
 from jax._src.tree_util import (tree_flatten, tree_unflatten,
-                                register_pytree_node, PyTreeDef)
+                                register_pytree_node, PyTreeDef, FlatTree)
 from jax._src import mesh as mesh_lib
 from jax._src import core
 from jax._src import source_info_util
@@ -58,13 +58,40 @@ def _update_annotation(
   tan_types = [aval.to_tangent_aval() for nz, aval in zip(nonzeros, orig_type) if nz]
   return lu.annotate(f, (*orig_type, *tan_types))
 
-def jvp(fun: lu.WrappedFun, has_aux=False, instantiate=True,
-    transform_stack=True) -> Any:
-  if not has_aux:
-    return jvpfun(jvp_subtrace(fun), instantiate, transform_stack)
+def jvp(fun: Callable, primals, tangents, has_aux=False, instantiate=True,
+        transform_stack=True) -> Any:
+  ctx = (source_info_util.transform_name_stack('jvp') if transform_stack
+         else contextlib.nullcontext())
+  with core.take_current_trace() as parent_trace:
+    tag = core.TraceTag()
+    trace = JVPTrace(parent_trace, tag)
+    tangents = tangents.map(lambda t:
+        p2tz(t) if not isinstance(t, Zero)
+        and isinstance(typeof(t), core.ShapedArray)
+        and dtype(t) == float0 else t)
+    in_tracers = primals.map2(lambda x, t: maybe_jvp_tracer(trace, x, t), tangents)
+    with core.set_current_trace(trace), ctx:
+      ans = fun(*in_tracers.unflatten())
+    if has_aux:
+        ans, aux = ans
+    else:
+        aux = None
+
+    ans_ft = FlatTree.flatten(ans).map(trace.to_primal_tangent_pair)
+    out_primals = ans_ft.map(lambda pt: pt[0])
+    out_tangents = ans_ft.map(lambda pt: pt[1])
+
+    if type(instantiate) is bool:
+      instantiate = [instantiate] * len(out_tangents)
+    out_tangents = out_tangents.map2(
+        lambda t, inst: instantiate_zeros(t) if inst else t, instantiate)
+  if has_aux:
+    aux = (FlatTree.flatten(aux).map(
+           lambda x: x.primal if isinstance(x, JVPTracer) 
+           and x._trace.tag is tag else x),)
   else:
-    fun, aux = jvp_subtrace_aux(fun)
-    return jvpfun(fun, instantiate, transform_stack), aux
+    aux = ()
+  return out_primals, out_tangents, *aux
 
 @lu.transformation2
 def jvpfun(f: Callable, instantiate, transform_stack, primals, tangents):
@@ -181,18 +208,6 @@ def jvp_subtrace(f: Callable, tag: core.TraceTag, primals, tangents):
       ans = f(*in_tracers)
     out = unzip2(map(trace.to_primal_tangent_pair, ans))
   return out
-
-@lu.transformation_with_aux2
-def jvp_subtrace_aux(f, store, tag, primals, tangents):
-  with core.take_current_trace() as parent_trace:
-    trace = JVPTrace(parent_trace, tag)
-    with core.set_current_trace(trace):
-      ans, aux = f(*(map(partial(maybe_jvp_tracer, trace), primals, tangents)))
-    out_primals, out_tangents = unzip2(map(trace.to_primal_tangent_pair, ans))
-    aux_primals = [x.primal if isinstance(x, JVPTracer) and x._trace.tag is tag
-                   else x for x in aux]
-  store.store(aux_primals)
-  return out_primals, out_tangents
 
 def linearize_jaxpr(
     jaxpr: core.ClosedJaxpr,
@@ -1254,10 +1269,36 @@ def jvp_jaxpr(jaxpr: core.ClosedJaxpr, nonzeros: Sequence[bool],
     instantiate = (instantiate,) * len(jaxpr.out_avals)
   return _jvp_jaxpr(jaxpr, tuple(nonzeros), tuple(instantiate))
 
+
 @weakref_lru_cache
 def _jvp_jaxpr(jaxpr: core.ClosedJaxpr,
                nonzeros: Sequence[bool], instantiate: Sequence[bool]):
   assert len(jaxpr.in_avals) == len(nonzeros)
+  tangent_avals = [aval.to_tangent_aval()
+                   for aval, nz in zip(jaxpr.in_aval_qdds, nonzeros) if nz]
+  avals_in = FlatTree.flatten(((jaxpr.in_aval_qdds, tangent_avals), {}))
+  dbg = jaxpr.jaxpr.debug_info.with_unknown_names()
+  def f_jvp_traceable(primals, nonzero_tangents):
+    nonzero_tangents_iter = iter(nonzero_tangents)
+    tangents = [next(nonzero_tangents_iter) if nz else p2tz(p)
+              for p, nz in zip(primals, nonzeros)]
+    primals_ft = FlatTree.flatten(primals)
+    tangents_ft = primals_ft.update(tangents)
+    primals_out, tangents_out = jvp(core.jaxpr_as_fun(jaxpr), primals_ft, tangents_ft)
+    out_nonzeros = [type(t) is not Zero for t in tangents_out]
+    nonzero_tangents_out = [t for t in tangents_out if type(t) is not Zero]
+
+    primals_out_ft = FlatTree.flatten(primals_out)
+    
+    # return FlatTree.Flatten((prima
+    # store.store(out_nonzeros)
+    # return (primals_out) + nonzero_tangents_out
+
+  jaxpr, out_avals = pe.trace_to_jaxpr(f_jvp_traceable, avals_in, dbg,
+                                       fun_returns_flat_tree=True)
+
+  # ------
+
   f = lu.wrap_init(core.jaxpr_as_fun(jaxpr),
                    debug_info=jaxpr.jaxpr.debug_info.with_unknown_names())
   f_jvp, out_nonzeros = f_jvp_traceable(
@@ -1269,8 +1310,8 @@ def _jvp_jaxpr(jaxpr: core.ClosedJaxpr,
       f_jvp, avals_in)
   return core.ClosedJaxpr(jaxpr_out, literals_out), out_nonzeros()
 
-@lu.transformation_with_aux2
-def f_jvp_traceable(f, store, nonzeros, *primals_and_nztangents):
+  # ---@lu.transformation_with_aux2
+  # -  def f_jvp_traceable(f, store, nonzeros, *primals_and_nztangents):
   num_primals = len(nonzeros)
   primals = list(primals_and_nztangents[:num_primals])
   nonzero_tangents = iter(primals_and_nztangents[num_primals:])

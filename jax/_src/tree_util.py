@@ -1550,6 +1550,21 @@ class FlatTree:
   def __getitem__(self, i):
     assert False, "todo"
 
+  def filter(self, f):
+    # a FlatTree version of list.filter. Unlike the latter, it keeps
+    # the filtered-out data in the pytree structure, so that it can
+    # be reinstantiated with `unfilter`.
+    assert False
+
+  def unfilter(self):
+    assert False
+
+def unfilter_pytree(x, f):
+  pass
+
+
+
+
 def unwrap_statics(pytree, statics):
   if statics is False:
     return pytree

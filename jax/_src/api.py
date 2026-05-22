@@ -44,7 +44,7 @@ from jax._src.tree_util import (
     tree_map, tree_flatten, tree_unflatten, tree_structure, tree_transpose,
     tree_leaves, Partial, PyTreeDef, keystr, generate_key_paths,
     tree_flatten_with_path, equality_errors_pytreedef, register_pytree_node,
-    register_dataclass)
+    register_dataclass, FlatTree)
 from jax._src import config
 from jax._src import core
 from jax._src import dispatch
@@ -1418,18 +1418,17 @@ def jvp(
       not isinstance(tangents, (tuple, list))):
     raise TypeError("primal and tangent arguments to jax.jvp must be tuples or lists; "
                     f"found {type(primals).__name__} and {type(tangents).__name__}.")
-  return _jvp(lu.wrap_init(fun, debug_info=debug_info("jvp", fun, primals, {})),
-              primals, tangents, has_aux=has_aux)
+  return _jvp(fun, primals, tangents, has_aux=has_aux)
 
-def _jvp(fun: lu.WrappedFun, primals, tangents, has_aux=False):
-  """Variant of jvp() that takes an lu.WrappedFun."""
-  ps_flat, tree_def = tree_flatten(primals)
-  ts_flat, tree_def_2 = tree_flatten(tangents)
-  if tree_def != tree_def_2:
+def _jvp(fun: Callable, primals, tangents, has_aux=False):
+  dbg=debug_info("jvp", fun, primals, {})
+  ps_ft = FlatTree.flatten(primals)
+  ts_ft = FlatTree.flatten(tangents)
+  if ps_ft.tree != ts_ft.tree:
     raise TypeError("primal and tangent arguments to jax.jvp must have the same tree "
-                    f"structure; primals have tree structure {tree_def} whereas tangents have "
-                    f"tree structure {tree_def_2}.")
-  for p, t in zip(ps_flat, ts_flat):
+                    f"structure; primals have tree structure {ps_ft.tree} whereas tangents have "
+                    f"tree structure {ts_ft.tree}.")
+  for p, t in zip(ps_ft, ts_ft):
     if not isinstance(core.typeof(p), ShapedArray): continue
     if core.primal_dtype_to_tangent_dtype(_dtype(p)) != _dtype(t):
       raise TypeError("primal and tangent arguments to jax.jvp do not match; "
@@ -1442,20 +1441,11 @@ def _jvp(fun: lu.WrappedFun, primals, tangents, has_aux=False):
       raise ValueError("jvp called with different primal and tangent shapes;"
                        f"Got primal shape {np.shape(p)} and tangent shape as {np.shape(t)}")
 
-  if not has_aux:
-    flat_fun, out_tree = flatten_fun_nokwargs(fun, tree_def)
-    out_primals, out_tangents = ad.jvp(flat_fun).call_wrapped(ps_flat, ts_flat)
-    out_tree = out_tree()
-    return (tree_unflatten(out_tree, out_primals),
-            tree_unflatten(out_tree, out_tangents))
+  out_primals, out_tangents, *aux = ad.jvp(fun, ps_ft, ts_ft, has_aux=has_aux)
+  if has_aux:
+    return out_primals.unflatten(), out_tangents.unflatten(), aux[0].unflatten()
   else:
-    flat_fun, out_aux_trees = flatten_fun_nokwargs2(fun, tree_def)
-    jvp_fun, aux = ad.jvp(flat_fun, has_aux=True)
-    out_primals, out_tangents = jvp_fun.call_wrapped(ps_flat, ts_flat)
-    out_tree, aux_tree = out_aux_trees()
-    return (tree_unflatten(out_tree, out_primals),
-            tree_unflatten(out_tree, out_tangents),
-            tree_unflatten(aux_tree, aux()))
+    return out_primals.unflatten(), out_tangents.unflatten()
 
 @overload
 def linearize(fun: Callable, *primals, has_aux: Literal[False] = False
