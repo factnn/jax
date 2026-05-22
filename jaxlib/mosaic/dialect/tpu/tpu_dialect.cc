@@ -768,4 +768,31 @@ std::pair<bool, bool> mightCommunicateBetweenChips(mlir::Operation* op) {
   return std::make_pair(state.has_communication, state.has_custom_barrier);
 }
 
+namespace {
+bool hasHbmOrTcVmemOrVmemSharedMemorySpace(MemorySpaceAttr ms) {
+  return ms.getValue() == MemorySpace::kHbm ||
+         (ms.getValue() == MemorySpace::kVmem && ms.getCoreType().has_value() &&
+          *ms.getCoreType() == CoreType::kTc) ||
+         ms.getValue() == MemorySpace::kVmemShared;
+}
+}  // namespace
+
+FailureOr<bool> isGather(Operation& op, MemorySpaceAttr source_ms,
+                         MemorySpaceAttr target_ms) {
+  if (source_ms == nullptr || target_ms == nullptr) {
+    return false;
+  }
+  if (hasHbmOrTcVmemOrVmemSharedMemorySpace(source_ms) &&
+      target_ms.getValue() == MemorySpace::kVmem) {
+    return true;
+  }
+  if (source_ms.getValue() == MemorySpace::kVmem &&
+      hasHbmOrTcVmemOrVmemSharedMemorySpace(target_ms)) {
+    return false;
+  }
+  return op.emitOpError(
+      "The transfer must be between HBM and VMEM, or between VMEM_SHARED and "
+      "VMEM");
+}
+
 }  // namespace mlir::tpu

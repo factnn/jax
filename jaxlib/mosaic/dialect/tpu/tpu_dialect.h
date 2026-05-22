@@ -108,9 +108,10 @@ DotDimensionNumbersAttr defaultDimensionNumbers(Builder& builder,
                                                 bool transpose_lhs,
                                                 bool transpose_rhs);
 
-/// Returns true if `op` is a transfer from shared to local memory.
-FailureOr<bool> isGather(Operation& op, MemRefType source_ty,
-                         MemRefType target_ty);
+// True if source represents a shared memory space and target represents a local
+// memory space.
+FailureOr<bool> isGather(Operation& op, MemorySpaceAttr source_ms,
+                         MemorySpaceAttr target_ms);
 
 #define GEN_PASS_REGISTRATION
 #include "jaxlib/mosaic/dialect/tpu/tpu_passes.h.inc"
