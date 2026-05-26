@@ -1650,16 +1650,12 @@ class FragmentedArray:
   def __lshift__(self, other):
     if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
-    return self._pointwise(arith.shli, other, restrict_bitwidth=False)
+    return self._pointwise(arith.shli, other)
 
   def __rshift__(self, other):
     if not isinstance(self.mlir_dtype, ir.IntegerType):
       return NotImplemented
-    return self._pointwise(
-        arith.shrsi if self.is_signed else arith.shrui,
-        other,
-        restrict_bitwidth=False,
-    )
+    return self._pointwise(arith.shrsi, other)
 
   def __eq__(self, other):
     return self._compare(
