@@ -19,7 +19,6 @@ from functools import partial
 import inspect
 import itertools as it
 import operator
-import os
 from typing import Any, TypeVar
 import weakref
 
@@ -2923,15 +2922,12 @@ def _cumred_chlo_lowering(ctx, x, *, axis, reverse, reducer, identity):
 
 
 def _is_supported_cumred(inp, axis, reverse):
-  if os.environ.get('JAX_ENABLE_CHLO_SCAN') != '1':
-    return False
-
   return (
       not reverse
       and isinstance(inp, ShapedArray)
       and core.is_constant_shape(inp.shape)
       and inp.shape[axis] > 0
-      and inp.sharding.spec[axis] is None
+      and isinstance(inp.sharding, sharding.SingleDeviceSharding)
       and inp.dtype != np.bool_
       and not np.issubdtype(inp.dtype, np.complexfloating)
   )
