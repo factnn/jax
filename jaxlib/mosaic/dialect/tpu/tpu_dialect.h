@@ -30,6 +30,7 @@ limitations under the License.
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "jaxlib/mosaic/dialect/tpu/layout.h"  // IWYU pragma: keep
 #include "jaxlib/mosaic/dialect/tpu/stringify_util.h"
@@ -108,9 +109,18 @@ DotDimensionNumbersAttr defaultDimensionNumbers(Builder& builder,
                                                 bool transpose_lhs,
                                                 bool transpose_rhs);
 
-/// Returns true if `op` is a transfer from shared to local memory.
-FailureOr<bool> isGather(Operation& op, MemRefType source_ty,
-                         MemRefType target_ty);
+// True if source represents a shared memory space and target represents a local
+// memory space. TC VMEM is "shared" here but it is not shared between TCs.
+FailureOr<bool> isGather(Operation& op, MemorySpaceAttr source_ms,
+                         MemorySpaceAttr target_ms);
+
+LogicalResult verifyGather(Operation* op, ArrayRef<int64_t> operand_shape,
+                           ArrayRef<int64_t> offsets_shape,
+                           ArrayRef<int64_t> result_shape);
+
+LogicalResult verifyScatter(Operation* op, ArrayRef<int64_t> updates_shape,
+                            ArrayRef<int64_t> offsets_shape,
+                            ArrayRef<int64_t> operand_shape);
 
 #define GEN_PASS_REGISTRATION
 #include "jaxlib/mosaic/dialect/tpu/tpu_passes.h.inc"
